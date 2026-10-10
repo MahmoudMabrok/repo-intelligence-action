@@ -1,5 +1,5 @@
 name: "Repo Intelligence"
-description: "Analyze a repository for LOC, git history, contributors, AI-agent signals, and acceptance gates. Outputs a JSON report."
+description: "Analyze a repository for LOC, age, commit frequency/categories, AI signals, and acceptance gates."
 author: "Mahmoud Mabrok"
 branding:
   icon: "bar-chart-2"
@@ -119,17 +119,27 @@ runs:
         import json
         r = json.load(open("report.json"))
         ai = r.get("ai_analytics", {})
+        freq = r.get("commit_frequency", {})
+        age = r.get("code_age", {})
+        cats = r.get("commit_categories", {})
+        insights = r.get("code_insights", {})
         print(f"- **LOC**: {r.get('loc', 0)}")
         print(f"- **Source files**: {r.get('source_files', 0)}")
         print(f"- **Contributors**: {r.get('contributors', 0)}")
         print(f"- **Commits**: {r.get('commits', 0)}")
-        print(f"- **Span (days)**: {r.get('span_days', 0)}")
-        print(f"- **Span (months)**: {r.get('span_months', 0)}")
-        print(f"- **AI signal score**: {ai.get('ai_signal_score', 0)} ({ai.get('ai_signal_label', 'low')})")
-        print(f"- **AI-related commits**: {ai.get('ai_commits', 0)} ({ai.get('ai_commit_percent', 0)}%)")
-        print(f"- **AI config files**: {len(ai.get('ai_config_files', []))}")
-        print(f"- **AI marker hits**: {ai.get('ai_marker_hits', 0)}")
+        print(f"- **Span (days / months)**: {r.get('span_days', 0)} / {r.get('span_months', 0)}")
+        print(f"- **Days since last commit**: {age.get('days_since_last_commit')}")
+        print(f"- **Commits / week**: {freq.get('commits_per_week', 0)}")
+        print(f"- **Active days**: {freq.get('active_days', 0)}")
+        print(f"- **Last 30 / 90 days**: {freq.get('commits_last_30_days', 0)} / {freq.get('commits_last_90_days', 0)}")
+        print(f"- **Has CI**: {insights.get('has_ci', False)}")
+        print(f"- **Test files**: {insights.get('test_files', 0)}")
+        print(f"- **AI signal**: {ai.get('ai_signal_score', 0)} ({ai.get('ai_signal_label', 'low')})")
         print(f"- **Passed gates**: {r.get('passed', False)}")
+        if cats:
+            print("\n### Commit categories")
+            for k, v in sorted(cats.items(), key=lambda x: -x[1]):
+                print(f"- **{k}**: {v}")
         if r.get("failures"):
             print("\n### Failures")
             for f in r["failures"]:
