@@ -1,0 +1,123 @@
+name: "Repo Intelligence"
+description: "Analyze a repository for LOC, git history, contributors, and basic acceptance gates. Outputs a JSON report as an artifact."
+author: "Custom (inspired by local repo analysis tools)"
+
+inputs:
+  min_source_files:
+    description: "Minimum number of source files to pass"
+    required: false
+    default: "20"
+  min_loc:
+    description: "Minimum source LOC to pass"
+    required: false
+    default: "5000"
+  min_contributors:
+    description: "Minimum human-like contributors to pass"
+    required: false
+    default: "2"
+  min_commits:
+    description: "Minimum commits to pass"
+    required: false
+    default: "100"
+  min_months:
+    description: "Minimum development span in months to pass"
+    required: false
+    default: "6"
+  require_readme:
+    description: "Fail if README is missing or too short"
+    required: false
+    default: "true"
+  scan_secrets:
+    description: "Run gitleaks secret scan (true/false)"
+    required: false
+    default: "true"
+  fail_on_gates:
+    description: "Fail the job if acceptance gates are not met"
+    required: false
+    default: "false"
+
+outputs:
+  report_path:
+    description: "Path to the generated report JSON"
+    value: ${{ steps.analyze.outputs.report_path }}
+  passed:
+    description: "Whether all configured gates passed"
+    value: ${{ steps.analyze.outputs.passed }}
+  loc:
+    description: "Total source lines of code"
+    value: ${{ steps.analyze.outputs.loc }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout full history
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Install scc
+      shell: bash
+      run: |
+        set -euo pipefail
+        SCC_VERSION="3.5.0"
+        curl -fsSL -o /tmp/scc.tar.gz \
+          "https://github.com/boyter/scc/releases/download/v${SCC_VERSION}/scc_${SCC_VERSION}_Linux_x86_64.tar.gz"
+        tar -xzf /tmp/scc.tar.gz -C /tmp
+        sudo mv /tmp/scc /usr/local/bin/scc
+        scc --version
+
+    - name: Optional gitleaks
+      if: ${{ inputs.scan_secrets == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        GITLEAKS_VERSION="8.21.2"
+        curl -fsSL -o /tmp/gitleaks.tar.gz \
+          "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+        tar -xzf /tmp/gitleaks.tar.gz -C /tmp
+        sudo mv /tmp/gitleaks /usr/local/bin/gitleaks
+        gitleaks version
+
+    - name: Analyze repository
+      id: analyze
+      shell: bash
+      env:
+        MIN_SOURCE_FILES: ${{ inputs.min_source_files }}
+        MIN_LOC: ${{ inputs.min_loc }}
+        MIN_CONTRIBUTORS: ${{ inputs.min_contributors }}
+        MIN_COMMITS: ${{ inputs.min_commits }}
+        MIN_MONTHS: ${{ inputs.min_months }}
+        REQUIRE_README: ${{ inputs.require_readme }}
+        SCAN_SECRETS: ${{ inputs.scan_secrets }}
+        FAIL_ON_GATES: ${{ inputs.fail_on_gates }}
+      run: |
+        set -euo pipefail
+        python3 "$GITHUB_ACTION_PATH/analyze.py"
+
+    - name: Upload report
+      uses: actions/upload-artifact@v4
+      with:
+        name: repo-intelligence-report
+        path: report.json
+        if-no-files-found: error
+
+    - name: Job summary
+      shell: bash
+      run: |
+        if [ -f report.json ]; then
+          echo "## Repo Intelligence Report" >> "$GITHUB_STEP_SUMMARY"
+          python3 - << 'PY' >> "$GITHUB_STEP_SUMMARY"
+        import json
+        r = json.load(open("report.json"))
+        print(f"- **LOC**: {r.get('loc', 0)}")
+        print(f"- **Source files**: {r.get('source_files', 0)}")
+        print(f"- **Contributors**: {r.get('contributors', 0)}")
+        print(f"- **Commits**: {r.get('commits', 0)}")
+        print(f"- **Span (months)**: {r.get('span_months', 0)}")
+        print(f"- **Passed gates**: {r.get('passed', False)}")
+        if r.get("failures"):
+            print("\n### Failures")
+            for f in r["failures"]:
+                print(f"- {f}")
+        PY
+        fi

@@ -1,0 +1,26 @@
+name: Repo Intelligence
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run repo intelligence
+        uses: ./
+        with:
+          min_source_files: "20"
+          min_loc: "5000"
+          min_contributors: "2"
+          min_commits: "100"
+          min_months: "6"
+          require_readme: "true"
+          scan_secrets: "true"
+          fail_on_gates: "false"
