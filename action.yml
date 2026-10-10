@@ -1,6 +1,9 @@
 name: "Repo Intelligence"
 description: "Analyze a repository for LOC, git history, contributors, and basic acceptance gates. Outputs a JSON report as an artifact."
-author: "Custom (inspired by local repo analysis tools)"
+author: "Mahmoud Mabrok"
+branding:
+  icon: "bar-chart-2"
+  color: "blue"
 
 inputs:
   min_source_files:
