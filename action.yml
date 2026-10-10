@@ -1,5 +1,5 @@
 name: "Repo Intelligence"
-description: "Analyze a repository for LOC, git history, contributors, and basic acceptance gates. Outputs a JSON report as an artifact."
+description: "Analyze a repository for LOC, git history, contributors, AI-agent signals, and acceptance gates. Outputs a JSON report."
 author: "Mahmoud Mabrok"
 branding:
   icon: "bar-chart-2"
@@ -49,6 +49,12 @@ outputs:
   loc:
     description: "Total source lines of code"
     value: ${{ steps.analyze.outputs.loc }}
+  span_days:
+    description: "Development span in days"
+    value: ${{ steps.analyze.outputs.span_days }}
+  ai_signal_score:
+    description: "Heuristic AI-agent signal score 0-100"
+    value: ${{ steps.analyze.outputs.ai_signal_score }}
 
 runs:
   using: "composite"
@@ -112,11 +118,17 @@ runs:
           python3 - << 'PY' >> "$GITHUB_STEP_SUMMARY"
         import json
         r = json.load(open("report.json"))
+        ai = r.get("ai_analytics", {})
         print(f"- **LOC**: {r.get('loc', 0)}")
         print(f"- **Source files**: {r.get('source_files', 0)}")
         print(f"- **Contributors**: {r.get('contributors', 0)}")
         print(f"- **Commits**: {r.get('commits', 0)}")
+        print(f"- **Span (days)**: {r.get('span_days', 0)}")
         print(f"- **Span (months)**: {r.get('span_months', 0)}")
+        print(f"- **AI signal score**: {ai.get('ai_signal_score', 0)} ({ai.get('ai_signal_label', 'low')})")
+        print(f"- **AI-related commits**: {ai.get('ai_commits', 0)} ({ai.get('ai_commit_percent', 0)}%)")
+        print(f"- **AI config files**: {len(ai.get('ai_config_files', []))}")
+        print(f"- **AI marker hits**: {ai.get('ai_marker_hits', 0)}")
         print(f"- **Passed gates**: {r.get('passed', False)}")
         if r.get("failures"):
             print("\n### Failures")
