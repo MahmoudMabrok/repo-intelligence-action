@@ -61,7 +61,7 @@ runs:
         set -euo pipefail
         SCC_VERSION="3.5.0"
         curl -fsSL -o /tmp/scc.tar.gz \
-          "https://github.com/boyter/scc/releases/download/v${SCC_VERSION}/scc_${SCC_VERSION}_Linux_x86_64.tar.gz"
+          "https://github.com/boyter/scc/releases/download/v${SCC_VERSION}/scc_Linux_x86_64.tar.gz"
         tar -xzf /tmp/scc.tar.gz -C /tmp
         sudo mv /tmp/scc /usr/local/bin/scc
         scc --version
