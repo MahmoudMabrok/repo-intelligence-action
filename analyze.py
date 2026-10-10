@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Lightweight repository intelligence analyzer for GitHub Actions.
 
-Collects LOC (via scc), git stats (including span in days), README check,
-optional secret scan, AI-agent signals, and acceptance gates. Writes report.json.
+Collects LOC, git age/frequency, commit categories (fix/ci/feat/...), AI signals,
+optional secret scan, and acceptance gates. Writes report.json.
 """
 
 import json
@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,22 +39,38 @@ SOURCE_EXTS = {
     ".rb", ".php", ".c", ".cpp", ".h", ".cs", ".swift", ".scala", ".md",
 }
 
+# Conventional-commit style + keyword fallbacks
+COMMIT_CATEGORIES = [
+    ("fix", re.compile(r"^(fix|bugfix|hotfix)(\(|:| )|^fix\b|\bfix(es|ed)?\b", re.I)),
+    ("feat", re.compile(r"^(feat|feature)(\(|:| )|^feat\b|\badd(ed)?\b|\bimplement", re.I)),
+    ("ci", re.compile(r"^(ci|cd)(\(|:| )|\b(workflow|pipeline|github action|actions)\b", re.I)),
+    ("docs", re.compile(r"^(docs?|readme)(\(|:| )|\b(readme|documentation)\b", re.I)),
+    ("test", re.compile(r"^(test|tests)(\(|:| )|\b(test|spec|coverage)\b", re.I)),
+    ("refactor", re.compile(r"^(refactor|cleanup)(\(|:| )|\brefactor\b", re.I)),
+    ("chore", re.compile(r"^(chore|deps|bump)(\(|:| )|\b(chore|bump|dependenc)\b", re.I)),
+    ("style", re.compile(r"^(style|fmt|format)(\(|:| )", re.I)),
+    ("perf", re.compile(r"^(perf|performance)(\(|:| )|\bperf(ormance)?\b", re.I)),
+    ("build", re.compile(r"^(build|release)(\(|:| )", re.I)),
+    ("revert", re.compile(r"^(revert)(\(|:| )|\brevert\b", re.I)),
+]
+
 
 def run(cmd, check=True, capture=True):
-    result = subprocess.run(
-        cmd,
-        check=False,
-        capture_output=capture,
-        text=True,
-    )
+    result = subprocess.run(cmd, check=False, capture_output=capture, text=True)
     if check and result.returncode != 0:
         print(result.stderr or result.stdout, file=sys.stderr)
         raise SystemExit(result.returncode)
     return result
 
 
+def classify_commit(subject: str) -> str:
+    for name, pat in COMMIT_CATEGORIES:
+        if pat.search(subject):
+            return name
+    return "other"
+
+
 def scc_summary():
-    """Return total code lines and file count from scc JSON."""
     result = run(["scc", "--format", "json", "."], check=False)
     if result.returncode != 0:
         print("scc failed, falling back to zeros", file=sys.stderr)
@@ -77,30 +94,25 @@ def scc_summary():
 
 
 def git_stats():
-    """Return commits, contributors, span in days and months, plus AI commit signals."""
-    commits = 0
-    contributors = 0
-    span_days = 0
-    span_months = 0.0
-    first = None
-    last = None
-    ai_commits = 0
-    ai_authors = set()
-    sample_ai_messages = []
-
-    log = run(
-        ["git", "log", "--pretty=format:%aI|%aN|%s", "--all"],
-        check=False,
-    )
+    log = run(["git", "log", "--pretty=format:%aI|%aN|%s", "--all"], check=False)
+    empty = {
+        "commits": 0, "contributors": 0, "span_days": 0, "span_months": 0.0,
+        "first": None, "last": None, "ai_commits": 0, "ai_authors": [],
+        "ai_commit_samples": [], "categories": {}, "frequency": {},
+        "code_age": {},
+    }
     if log.returncode != 0 or not log.stdout.strip():
-        return {
-            "commits": 0, "contributors": 0, "span_days": 0, "span_months": 0.0,
-            "first": None, "last": None, "ai_commits": 0, "ai_authors": [],
-            "ai_commit_samples": [],
-        }
+        return empty
 
     authors = set()
     dates = []
+    ai_commits = 0
+    ai_authors = set()
+    sample_ai_messages = []
+    categories = Counter()
+    by_day = Counter()
+    by_weekday = Counter()
+
     for line in log.stdout.splitlines():
         parts = line.split("|", 2)
         if len(parts) < 3:
@@ -108,9 +120,13 @@ def git_stats():
         date_s, author, subject = parts
         authors.add(author.strip())
         try:
-            dates.append(datetime.fromisoformat(date_s.replace("Z", "+00:00")))
+            dt = datetime.fromisoformat(date_s.replace("Z", "+00:00"))
+            dates.append(dt)
+            by_day[dt.date().isoformat()] += 1
+            by_weekday[dt.strftime("%A")] += 1
         except ValueError:
             pass
+        categories[classify_commit(subject)] += 1
         if AI_COMMIT_KEYWORDS.search(subject) or AI_COMMIT_KEYWORDS.search(author):
             ai_commits += 1
             ai_authors.add(author.strip())
@@ -119,12 +135,26 @@ def git_stats():
 
     commits = len(log.stdout.splitlines())
     contributors = len(authors)
+    span_days = 0
+    span_months = 0.0
+    first = last = None
     if dates:
         first = min(dates)
         last = max(dates)
-        delta = last - first
-        span_days = max(delta.days, 0)
-        span_months = round(delta.days / 30.44, 1)
+        span_days = max((last - first).days, 0)
+        span_months = round(span_days / 30.44, 1)
+
+    now = datetime.now(timezone.utc)
+    active_days = len(by_day)
+    commits_per_week = round(commits / max(span_days / 7.0, 1), 2)
+    commits_per_active_day = round(commits / max(active_days, 1), 2)
+    last_30 = sum(1 for d in dates if (now - d).days <= 30)
+    last_90 = sum(1 for d in dates if (now - d).days <= 90)
+    busiest_day = by_day.most_common(1)[0] if by_day else (None, 0)
+    busiest_weekday = by_weekday.most_common(1)[0] if by_weekday else (None, 0)
+
+    repo_age_days = span_days
+    days_since_last = (now - last).days if last else None
 
     return {
         "commits": commits,
@@ -136,6 +166,23 @@ def git_stats():
         "ai_commits": ai_commits,
         "ai_authors": sorted(ai_authors),
         "ai_commit_samples": sample_ai_messages,
+        "categories": dict(categories),
+        "frequency": {
+            "active_days": active_days,
+            "commits_per_week": commits_per_week,
+            "commits_per_active_day": commits_per_active_day,
+            "commits_last_30_days": last_30,
+            "commits_last_90_days": last_90,
+            "busiest_day": {"date": busiest_day[0], "commits": busiest_day[1]},
+            "busiest_weekday": {"day": busiest_weekday[0], "commits": busiest_weekday[1]},
+            "weekday_breakdown": dict(by_weekday),
+        },
+        "code_age": {
+            "repo_age_days": repo_age_days,
+            "days_since_last_commit": days_since_last,
+            "first_commit": first.isoformat() if first else None,
+            "last_commit": last.isoformat() if last else None,
+        },
     }
 
 
@@ -149,10 +196,9 @@ def readme_ok(min_chars=200):
 
 
 def secret_scan():
-    """Run gitleaks if available. Returns finding count or None if skipped."""
     if os.environ.get("SCAN_SECRETS", "true").lower() not in ("1", "true", "yes"):
         return None
-    result = run(
+    run(
         ["gitleaks", "detect", "--source", ".", "--report-format", "json",
          "--report-path", "gitleaks-report.json", "--no-banner", "--exit-code", "0"],
         check=False,
@@ -167,21 +213,43 @@ def secret_scan():
     return 0
 
 
+def code_insights(by_lang, source_files):
+    """Extra static signals: tests, CI, docs."""
+    test_files = 0
+    has_ci = False
+    ci_files = []
+    for root, dirs, files in os.walk("."):
+        dirs[:] = [d for d in dirs if d not in {".git", "node_modules", "venv", ".venv", "dist", "build"}]
+        rel_root = root.replace("\\", "/")
+        if ".github/workflows" in rel_root or rel_root.endswith(".github/workflows"):
+            has_ci = True
+            for f in files:
+                if f.endswith((".yml", ".yaml")):
+                    ci_files.append(str(Path(root) / f))
+        for fname in files:
+            low = fname.lower()
+            if any(x in low for x in ("test", "spec")) and Path(fname).suffix.lower() in SOURCE_EXTS:
+                test_files += 1
+    top_langs = sorted(by_lang.items(), key=lambda x: x[1].get("code", 0), reverse=True)[:5]
+    return {
+        "top_languages": [{ "language": n, **v } for n, v in top_langs],
+        "test_files": test_files,
+        "has_ci": has_ci or Path(".github/workflows").is_dir() or Path(".gitlab-ci.yml").is_file(),
+        "ci_files": ci_files[:10],
+        "source_files": source_files,
+    }
+
+
 def ai_file_signals():
-    """Find AI-agent config files and marker hits in source."""
     found_files = []
     marker_files = []
     marker_hits = 0
     scanned_files = 0
-
     for pattern in AI_FILE_PATTERNS:
         p = Path(pattern)
         if p.exists():
             found_files.append(str(p))
-
-    # Also walk for common AI config names
     for root, dirs, files in os.walk("."):
-        # skip heavy dirs
         dirs[:] = [d for d in dirs if d not in {".git", "node_modules", "venv", ".venv", "dist", "build"}]
         for fname in files:
             rel = Path(root) / fname
@@ -190,9 +258,7 @@ def ai_file_signals():
                 if str(rel) not in found_files:
                     found_files.append(str(rel))
             ext = Path(fname).suffix.lower()
-            if ext not in SOURCE_EXTS:
-                continue
-            if scanned_files > 400:
+            if ext not in SOURCE_EXTS or scanned_files > 400:
                 continue
             try:
                 text = rel.read_text(errors="ignore")[:200_000]
@@ -204,7 +270,6 @@ def ai_file_signals():
                 marker_hits += hits
                 if len(marker_files) < 15:
                     marker_files.append(str(rel))
-
     return {
         "ai_config_files": sorted(set(found_files))[:30],
         "ai_marker_files": marker_files,
@@ -214,27 +279,15 @@ def ai_file_signals():
 
 
 def ai_analytics(git, file_signals, total_commits):
-    """Combine signals into a simple AI-agent statistics block."""
     ai_commits = git["ai_commits"]
     ai_commit_pct = round(100.0 * ai_commits / total_commits, 1) if total_commits else 0.0
-    has_config = len(file_signals["ai_config_files"]) > 0
-    has_markers = file_signals["ai_marker_hits"] > 0
-
-    # Heuristic confidence 0-100 based on signals (not a real detector)
     score = 0
-    if has_config:
+    if file_signals["ai_config_files"]:
         score += 30
     score += min(40, ai_commit_pct)
     score += min(30, file_signals["ai_marker_hits"] * 5)
     score = int(min(100, score))
-
-    if score >= 50:
-        label = "likely"
-    elif score >= 20:
-        label = "possible"
-    else:
-        label = "low"
-
+    label = "likely" if score >= 50 else "possible" if score >= 20 else "low"
     return {
         "ai_commits": ai_commits,
         "ai_commit_percent": ai_commit_pct,
@@ -264,6 +317,7 @@ def main():
     secrets = secret_scan()
     file_signals = ai_file_signals()
     ai = ai_analytics(git, file_signals, git["commits"])
+    insights = code_insights(by_lang, source_files)
 
     failures = []
     if source_files < min_files:
@@ -295,6 +349,10 @@ def main():
         "span_months": git["span_months"],
         "first_commit": git["first"],
         "last_commit": git["last"],
+        "code_age": git["code_age"],
+        "commit_frequency": git["frequency"],
+        "commit_categories": git["categories"],
+        "code_insights": insights,
         "readme": {"present": has_readme, "chars": readme_chars, "file": readme_name},
         "secret_findings": secrets,
         "ai_analytics": ai,
